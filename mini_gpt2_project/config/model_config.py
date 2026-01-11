@@ -41,10 +41,11 @@ class ModelConfig:
     # --------------------
 
     # --- API CONFIGURATION ---
-    api_provider: str = "huggingface" # Options: "gemini", "groq", "huggingface"
+    api_provider: str = "gemini" # Options: "gemini", "groq", "huggingface"
     
-    # Using Llama 3 70B (Fast & High Intelligence)
-    api_model_name: str = "microsoft/Phi-3.5-mini-instruct"     
+    # Gemini 1.5 Flash: 1M Context Window (Fits whole books), Free Tier available.
+    # Fixed by the pip upgrade in kaggle_pipeline.py
+    api_model_name: str = "gemini-1.5-flash"     
     
     # --- HARDCODED KEYS ---
     gemini_key: str = "AIzaSyCRZKG8wDenGmHSLJPL21ZMIRBW23hOlgk"

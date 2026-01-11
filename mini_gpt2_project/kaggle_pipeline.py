@@ -10,14 +10,15 @@ from pathlib import Path
 
 def install_dependencies():
     """Install required packages for the pipeline."""
+    # WE SPECIFICALLY FORCE VERSION >=0.7.0 TO FIX THE GEMINI 404 ERROR
     packages = [
         "transformers", 
-        "google-generativeai", 
+        "google-generativeai>=0.7.0", 
         "groq", 
         "python-dotenv"
     ]
     print(f"Installing dependencies: {', '.join(packages)}...")
-    # Added --upgrade to ensure we get versions that support newer models like 1.5-flash
+    # --upgrade is essential here
     subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade"] + packages + ["-q"])
 
 def run_kaggle_pipeline():
