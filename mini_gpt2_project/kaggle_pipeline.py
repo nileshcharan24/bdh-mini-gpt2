@@ -9,7 +9,15 @@ import subprocess
 from pathlib import Path
 
 def install_dependencies():
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "transformers", "-q"])
+    """Install required packages for the pipeline."""
+    packages = [
+        "transformers", 
+        "google-generativeai", 
+        "groq", 
+        "python-dotenv"
+    ]
+    print(f"Installing dependencies: {', '.join(packages)}...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install"] + packages + ["-q"])
 
 def run_kaggle_pipeline():
     print("Starting Kaggle Pipeline...")
