@@ -41,10 +41,10 @@ class ModelConfig:
     # --------------------
 
     # --- API CONFIGURATION ---
-    api_provider: str = "groq" # Options: "gemini", "groq", "huggingface"
+    api_provider: str = "huggingface" # Options: "gemini", "groq", "huggingface"
     
     # Using Llama 3 70B (Fast & High Intelligence)
-    api_model_name: str = "llama-3.1-8b-instant"     
+    api_model_name: str = "meta-llama/Llama-3.1-8B-Instruct"     
     
     # --- HARDCODED KEYS ---
     gemini_key: str = "AIzaSyCRZKG8wDenGmHSLJPL21ZMIRBW23hOlgk"
