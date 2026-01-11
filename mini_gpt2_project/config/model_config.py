@@ -37,15 +37,15 @@ class ModelConfig:
     """
 
     # --- MODEL SWITCH ---
-    model_type: str = "api"  # Options: "bdh", "minigpt2", "api"
+    model_type: str = "bdh"  # Options: "bdh", "minigpt2", "api"
     # --------------------
 
     # --- API CONFIGURATION ---
-    api_provider: str = "gemini" # Options: "gemini", "groq", "huggingface"
+    api_provider: str = "" # Options: "gemini", "groq", "huggingface"
     
     # Gemini 1.5 Flash: 1M Context Window (Fits whole books), Free Tier available.
     # Fixed by the pip upgrade in kaggle_pipeline.py
-    api_model_name: str = "gemini-1.5-flash"     
+    api_model_name: str = ""     
     
     # --- HARDCODED KEYS ---
     gemini_key: str = "AIzaSyCRZKG8wDenGmHSLJPL21ZMIRBW23hOlgk"
