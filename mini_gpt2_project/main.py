@@ -2,7 +2,7 @@
 
 """
 Narrative Consistency Pipeline: Main
-Supports both Recurrent BDH and Mini-GPT2 architectures via config switching.
+Supports Recurrent BDH, Mini-GPT2, and External API Models via config switching.
 """
 
 import argparse
@@ -13,7 +13,7 @@ import pickle
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, Union
 
 # Fix for tokenizer parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -33,7 +33,7 @@ from mini_gpt2_project.utils.data_loader import get_tokenizer
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# --- MODIFIED IMPORTS FOR DYNAMIC MODEL LOADING ---
+# --- IMPORTS ---
 from .config.model_config import (
     get_config_by_name,
     InferenceConfig,
@@ -44,8 +44,14 @@ from .config.model_config import (
 from .metrics.analysis_metrics import ConsistencyMetrics, CalibrationResult
 from .utils.data_loader import DataLoader, ByteTokenizer, get_dataset_stats
 from .inference.predictor import NarrativePredictor  # Unified Wrapper
-from .model.bdh_recurrent import RecurrentBDH, RecurrentState
-from .model.mini_gpt2 import MiniGPT2
+
+# Model architectures (Wrapped in try/except to strictly allow API-only usage if deps missing)
+try:
+    from .model.bdh_recurrent import RecurrentBDH, RecurrentState
+    from .model.mini_gpt2 import MiniGPT2
+except ImportError:
+    RecurrentBDH = None
+    MiniGPT2 = None
 # ---------------------------------------
 
 def parse_args():
@@ -56,11 +62,6 @@ def parse_args():
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--train", action="store_true", help="Run calibration/training only")
     mode_group.add_argument("--inference", action="store_true", help="Run test inference only")
-    
-    # Model size (kept for compatibility)
-    size_group = parser.add_mutually_exclusive_group()
-    size_group.add_argument("--default", action="store_true", help="Use default model")
-    size_group.add_argument("--small", action="store_true", help="Use small model")
     
     # Pipeline options
     parser.add_argument("--dry-run", action="store_true", help="Quick test run")
@@ -107,10 +108,11 @@ def load_checkpoint(path: Path) -> CalibrationResult:
         max_velocities=data["max_velocities"],
         labels=data["labels"],
     )
-    calibration.consistent_mean = data["calibration"]["consistent_mean"]
-    calibration.consistent_std = data["calibration"]["consistent_std"]
-    calibration.contradict_mean = data["calibration"]["contradict_mean"]
-    calibration.contradict_std = data["calibration"]["contradict_std"]
+    # Load derived stats if available
+    calibration.consistent_mean = data.get("calibration", {}).get("consistent_mean", 0.0)
+    calibration.consistent_std = data.get("calibration", {}).get("consistent_std", 0.0)
+    calibration.contradict_mean = data.get("calibration", {}).get("contradict_mean", 0.0)
+    calibration.contradict_std = data.get("calibration", {}).get("contradict_std", 0.0)
     return calibration
 
 class BookTextDataset(Dataset):
@@ -147,61 +149,50 @@ def train_on_books(
     model_config: ModelConfig,
     device: torch.device,
     paths: Dict[str, Path],
-    max_steps: int = 4000,
-    batch_size: int = 4,  # Reduced from 24 to 4 to prevent OOM
+    max_steps: int = 1000,
+    batch_size: int = 4, 
 ) -> Tuple[Path, Optional[nn.Module]]:
-    """
-    Fine-tune model (BDH or GPT-2) on book texts using language modeling objective.
-    Adapts training step based on model_type.
-    """
+    """Fine-tune local models (BDH/GPT-2) on book texts."""
     print(f"\n{'='*60}\nPHASE 0: FINE-TUNING {model_config.model_type.upper()} ON BOOKS\n{'='*60}")
     
-    # Clear GPU cache before starting
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # 1. Gather all book paths for tokenizer training
+    # Tokenizer Setup
     book_paths = [str(loader.get_book_path(name)) for name in loader.book_mapping.keys()]
-    
-    # 2. Initialize Tokenizer
     print("Initializing Tokenizer...")
     tokenizer = get_tokenizer(model_config, training_files=book_paths)
     
-    # 3. Load and Tokenize text
+    # Data Loading
     all_chunks: List[List[int]] = []
     print("Loading and tokenizing book texts...")
-    
     for book_name in loader.book_mapping.keys():
         book_path = loader.get_book_path(book_name)
         print(f"Processing: {book_name}")
-        
         with open(book_path, 'r', encoding='utf-8', errors='replace') as f:
             text = f.read()
-            
         chunks = tokenizer.chunk_text(text, chunk_size=model_config.max_seq_len)
         all_chunks.extend(chunks)
         print(f"  Added {len(chunks)} chunks from {book_name}")
     
     print(f"\nTotal chunks: {len(all_chunks)}")
     
-    # 4. Prepare Dataset and Loader
     train_dataset = BookTextDataset(all_chunks, max_seq_len=model_config.max_seq_len)
     num_workers = min(os.cpu_count() or 1, 4)
-    
     train_loader = TorchDataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        num_workers=num_workers, 
         pin_memory=True
     )
 
-    # 5. Setup Optimizer and Loss
+    # Optimization Setup
     optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.1)
     model.train()
     criterion = nn.CrossEntropyLoss(ignore_index=0)
 
-    # 6. Training Loop
+    # Training Loop
     step = 0
     total_loss = 0.0
     pbar = tqdm(total=max_steps, desc="Training", unit="step")
@@ -219,32 +210,22 @@ def train_on_books(
         attention_mask = batch["attention_mask"].to(device)
         
         optimizer.zero_grad()
-        
         loss = None
         
-        # --- CONDITIONAL FORWARD PASS ---
+        # --- Forward Pass Dispatch ---
         if model_config.model_type == "bdh":
-            # RecurrentBDH: manual loss calculation from logits
             logits, _, _ = model(idx=input_ids)
             logits_flat = logits.view(-1, logits.size(-1))
             labels_flat = labels.view(-1)
             loss = criterion(logits_flat, labels_flat)
-            
         else:
-            # MiniGPT2: forward returns dict with 'loss' if labels provided
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             loss = outputs.get("loss")
-            # If model didn't compute loss, do it manually
             if loss is None:
                 logits = outputs["logits"]
                 logits_flat = logits.view(-1, logits.size(-1))
                 labels_flat = labels.view(-1)
                 loss = criterion(logits_flat, labels_flat)
-        # --------------------------------
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -252,24 +233,18 @@ def train_on_books(
 
         step += 1
         total_loss += loss.item()
-        
         pbar.update(1)
-        pbar.set_postfix({
-            "loss": f"{loss.item():.4f}",
-            "avg_loss": f"{total_loss/step:.4f}",
-        })
+        pbar.set_postfix({"loss": f"{loss.item():.4f}", "avg": f"{total_loss/step:.4f}"})
 
     pbar.close()
-
-    # 7. Save Final Model
+    
     final_checkpoint_path = paths["model_checkpoints"] / "model_final.pt"
-    # We pass None for lm_head as it's handled internally or via the model object
     save_model_checkpoint(model, None, optimizer, step, final_checkpoint_path)
     
     print(f"\n✓ Training complete! Final checkpoint: {final_checkpoint_path}")
     print(f"  Total steps: {step}")
     print(f"  Average loss: {total_loss/step:.4f}")
-
+    
     return final_checkpoint_path, None
 
 def save_model_checkpoint(
@@ -313,53 +288,63 @@ def load_model_checkpoint(
     return step
 
 def evaluate_on_train_csv(
-    model: nn.Module,
+    wrapper: NarrativePredictor,  # CHANGED: Takes wrapper instead of raw model
     loader: DataLoader,
-    model_config: ModelConfig,
-    device: torch.device,
+    novel_states: Dict[str, Any],
     paths: Dict[str, Path],
 ) -> float:
-    """Evaluate trained model on train.csv."""
+    """
+    Evaluate on train.csv.
+    
+    For Local Models: Checks prediction accuracy.
+    For API Models: Queries the API for consistency.
+    """
     print("\n" + "="*60 + "\nEVALUATING ON TRAIN.CSV\n" + "="*60)
-    model.eval()
-    tokenizer = get_tokenizer(model_config)
+    
     train_examples = loader.get_train_examples()
     predictions = []
     true_labels = []
+    
     print(f"Evaluating on {len(train_examples)} examples...")
 
-    with torch.no_grad():
-        for example in tqdm(train_examples, desc="Evaluating"):
-            try:
-                tokens = tokenizer.encode(example['content'])
-                if len(tokens) > model_config.max_seq_len:
-                    tokens = tokens[:model_config.max_seq_len]
-                else:
-                    tokens = tokens + [0] * (model_config.max_seq_len - len(tokens))
-                input_ids = torch.tensor([tokens], dtype=torch.long).to(device)
+    # We iterate nicely
+    for example in tqdm(train_examples, desc="Evaluating"):
+        try:
+            # Get Ground Truth
+            label = example['label_binary']
+            true_labels.append(label)
+            
+            # Perform Prediction via Wrapper (Universal for API & Local)
+            book_name = example['book_name']
+            
+            # If we have precomputed state (Text for API, Tensor for Local)
+            if book_name in novel_states:
+                novel_state = novel_states[book_name]
+                backstory_state, _ = wrapper.prime_with_backstory(example['content'])
                 
-                # --- CONDITIONAL FORWARD PASS ---
-                if model_config.model_type == "bdh":
-                    logits, _, _ = model(idx=input_ids)
-                else:
-                    attention_mask = torch.ones_like(input_ids)
-                    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-                    logits = outputs["logits"]
-                # --------------------------------
+                # Compute Velocity/Distance
+                # Local: 0.0 means identical, >0 means different
+                # API: 0.0 means Consistent, 1.0 means Contradictory (mapped in predictor.py)
+                velocity = wrapper.compute_velocity_from_states(backstory_state, novel_state)
                 
-                # Check prediction (simple heuristic for binary consistency check)
-                pred = logits[0, -1].argmax().item()
-                pred_binary = 1 if pred % 2 != 0 else 0 
+                # Map velocity to label
+                # If velocity is high (distance high or API said contradictory) -> Prediction is 0 (Contradictory)
+                # If velocity is low -> Prediction is 1 (Consistent)
                 
+                # Threshold logic (Simplistic for eval loop, Calibration phase refines this)
+                pred_binary = 1 if velocity < 0.5 else 0
                 predictions.append(pred_binary)
-                true_labels.append(example['label_binary'])
-            except Exception as e:
-                print(f"Error on example {example['id']}: {e}")
-                predictions.append(1)  # Default to consistent
-                true_labels.append(example['label_binary'])
-    
+            else:
+                # Default to consistent if book missing
+                predictions.append(1)
+
+        except Exception as e:
+            print(f"Error on example {example['id']}: {e}")
+            predictions.append(1) # Default
+            
     accuracy = accuracy_score(true_labels, predictions)
     print(f"\n✓ Accuracy on train.csv: {accuracy:.4f} ({accuracy*100:.2f}%)")
+    
     results_df = pd.DataFrame({
         "id": [ex['id'] for ex in train_examples],
         "true_label": true_labels,
@@ -371,18 +356,27 @@ def evaluate_on_train_csv(
 
 def precompute_novel_states(wrapper: NarrativePredictor, loader: DataLoader, paths: Dict[str, Path]) -> Dict[str, any]:
     cache_path = paths["checkpoints"] / "novel_states.pkl"
+    # If API mode, we might not want to cache large text blobs or maybe we do.
+    # For now, we allow caching.
+    
     if cache_path.exists():
         print(f"\n✓ Loading cached novel states from {cache_path}")
         with open(cache_path, 'rb') as f:
             return pickle.load(f)
+            
     print("\n" + "="*60 + "\nPHASE 0: PRE-COMPUTING NOVEL STATES\n" + "="*60)
     novel_states = {}
     for book_name in loader.book_mapping.keys():
         print(f"\nProcessing: {book_name}")
-        novel_path = loader.get_book_path(book_name)
-        novel_state = wrapper.compute_novel_state(novel_path, verbose=True)
-        novel_states[book_name] = novel_state
-        print(f"✓ Cached state for {book_name}")
+        try:
+            novel_path = loader.get_book_path(book_name)
+            # For API models, this caches the full text. For local models, it caches the state tensor.
+            novel_state = wrapper.compute_novel_state(novel_path, verbose=True)
+            novel_states[book_name] = novel_state
+            print(f"✓ Cached state for {book_name}")
+        except Exception as e:
+            print(f"Failed to load {book_name}: {e}")
+            
     with open(cache_path, 'wb') as f:
         pickle.dump(novel_states, f)
     return novel_states
@@ -390,41 +384,56 @@ def precompute_novel_states(wrapper: NarrativePredictor, loader: DataLoader, pat
 def run_calibration(wrapper: NarrativePredictor, loader: DataLoader, novel_states: Dict, paths: Dict, args, config_name: str, is_validation: bool = False) -> CalibrationResult:
     phase_name = "VALIDATION" if is_validation else "CALIBRATION"
     print(f"\n{'='*60}\nPHASE {'2' if is_validation else '1'}: {phase_name}\n{'='*60}")
+    
     train_examples = loader.get_train_examples()
     if not args.dry_run and not args.limit:
-        train_split, val_split = train_test_split(
-            train_examples, train_size=60, test_size=20, 
-            random_state=42, stratify=[ex['label_binary'] for ex in train_examples]
-        )
-        examples = val_split if is_validation else train_split
+        try:
+            train_split, val_split = train_test_split(
+                train_examples, train_size=0.8, test_size=0.2, 
+                random_state=42, stratify=[ex['label_binary'] for ex in train_examples]
+            )
+            examples = val_split if is_validation else train_split
+        except:
+            # Fallback if stratify fails (e.g. too few examples)
+            examples = train_examples
     else:
         examples = train_examples[:args.limit] if args.limit else train_examples
+    
     calibration = CalibrationResult()
     pbar = tqdm(examples, desc=phase_name.title())
+    
     for i, example in enumerate(pbar):
         try:
             book_name = example['book_name']
             if book_name not in novel_states: continue
+            
             backstory_state, _ = wrapper.prime_with_backstory(example['content'])
             velocity = wrapper.compute_velocity_from_states(backstory_state, novel_states[book_name])
+            
             calibration.add_example(example['id'], velocity, example['label_binary'])
             pbar.set_postfix({"vel": f"{velocity:.4f}", "label": example['label_binary']})
+            
+            # Save partial calibration results occasionally
             if not is_validation and (i + 1) % 10 == 0:
                 calibration.compute_optimal_threshold()
                 save_checkpoint(calibration, paths["checkpoints"] / f"calibration_partial_{i+1}.json", config_name)
         except Exception as e:
             print(f"Error: {e}")
             continue
+            
     calibration.compute_optimal_threshold()
     print(f"Optimal Threshold: {calibration.optimal_threshold:.6f}")
+    
     if not is_validation:
         save_checkpoint(calibration, paths["checkpoints"] / "calibration_final.json", config_name)
     return calibration
 
 def run_inference(wrapper: NarrativePredictor, loader: DataLoader, novel_states: Dict, calibration: CalibrationResult, paths: Dict, args) -> pd.DataFrame:
     print("\n" + "="*60 + "\nPHASE 3: TEST INFERENCE\n" + "="*60)
+    
     test_examples = loader.get_test_examples()
     if args.limit: test_examples = test_examples[:args.limit]
+    
     results = []
     for example in tqdm(test_examples, desc="Predicting"):
         try:
@@ -436,9 +445,11 @@ def run_inference(wrapper: NarrativePredictor, loader: DataLoader, novel_states:
                 backstory_state, _ = wrapper.prime_with_backstory(example['content'])
                 velocity = wrapper.compute_velocity_from_states(backstory_state, novel_state)
                 prediction = calibration.predict(velocity)
+                
             results.append({"id": example['id'], "prediction": prediction, "velocity": velocity})
         except Exception as e:
             results.append({"id": example['id'], "prediction": 1, "velocity": 0.0})
+            
     results_df = pd.DataFrame(results)
     results_df[["id", "prediction"]].to_csv(paths["output"] / "results.csv", index=False)
     print(f"✓ Saved results to {paths['output']}/results.csv")
@@ -457,60 +468,85 @@ def main():
     
     print(f"Selected Model Architecture: {model_config.model_type.upper()}")
     
-    # 1. Initialize Model (Dynamic Switching)
-    if model_config.model_type == "bdh":
+    # 1. Initialize Model Logic
+    model = None
+    
+    if model_config.model_type == "api":
+        print(f"Mode: API Inference ({model_config.api_provider})")
+        # For API, we pass model=None. The wrapper initializes the API client.
+        model = None
+        
+    elif model_config.model_type == "bdh":
         print("Initializing Recurrent BDH...")
         model = RecurrentBDH(model_config).to(device)
     else:
         print("Initializing MiniGPT2...")
         model = MiniGPT2(model_config).to(device)
     
-    # Check if we should load a pretrained model
-    model_checkpoint = args.checkpoint
-    if model_checkpoint and Path(model_checkpoint).exists() and model_checkpoint.endswith('.pt'):
-        print(f"Loading pretrained model from {model_checkpoint}")
-        load_model_checkpoint(model, None, None, Path(model_checkpoint), device)
-    else:
-        print("\n" + "="*60)
-        print("TRAINING PHASE: Fine-tuning Model on book texts")
-        print("="*60)
-        best_checkpoint_path, _ = train_on_books(
-            model=model,
-            loader=loader,
-            model_config=model_config,
-            device=device,
-            paths=paths,
-            max_steps=4000,
-            batch_size=4, # Reduced size for stability
-        )
+    # 2. Local Model Training Phase (Strictly skipped for API)
+    if model is not None:
+        model_checkpoint = args.checkpoint
+        if model_checkpoint and Path(model_checkpoint).exists() and model_checkpoint.endswith('.pt'):
+            print(f"Loading pretrained model from {model_checkpoint}")
+            load_model_checkpoint(model, None, None, Path(model_checkpoint), device)
+        else:
+            print("\n" + "="*60)
+            print("TRAINING PHASE: Fine-tuning Model on book texts")
+            print("="*60)
+            best_checkpoint_path, _ = train_on_books(
+                model=model,
+                loader=loader,
+                model_config=model_config,
+                device=device,
+                paths=paths,
+                max_steps=1000, # Can increase as needed
+                batch_size=4,   # Safe default for memory
+            )
 
-    # Create wrapper with the trained/loaded model
-    wrapper = NarrativePredictor(model_config, inference_config, device, model=model, lm_head=None)
+    # 3. Create Unified Wrapper
+    # This initializes the API client internally if model is None
+    try:
+        wrapper = NarrativePredictor(model_config, inference_config, device, model=model, lm_head=None)
+    except ImportError as e:
+        print(f"CRITICAL ERROR: {e}")
+        return
     
-    # Evaluate on train.csv
+    # 4. Precompute States (Required for both API and Local)
+    # API: Caches text strings
+    # Local: Caches tensors
+    novel_states = precompute_novel_states(wrapper, loader, paths)
+    
+    # 5. Evaluate on Train Data (Validity Check)
+    # This runs for both API and Local now.
     evaluate_on_train_csv(
-        model=model,
+        wrapper=wrapper,
         loader=loader,
-        model_config=model_config,
-        device=device,
+        novel_states=novel_states,
         paths=paths,
     )
     
     run_train = not args.inference
     run_infer = not args.train
-    
-    novel_states = precompute_novel_states(wrapper, loader, paths)
     calibration = None
     
+    # 6. Calibration Phase
     if run_train:
+        # API returns 0/1 velocity, so calibration threshold is trivial (0.5), 
+        # but the pipeline flow remains consistent.
         calibration = run_calibration(wrapper, loader, novel_states, paths, args, "default", is_validation=False)
         if not args.dry_run and not args.limit:
             run_calibration(wrapper, loader, novel_states, paths, args, "default", is_validation=True)
             
+    # 7. Inference Phase
     if run_infer:
         if calibration is None:
             ckpt = args.checkpoint or (paths["checkpoints"] / "calibration_final.json")
-            calibration = load_checkpoint(Path(ckpt))
+            if Path(ckpt).exists():
+                calibration = load_checkpoint(Path(ckpt))
+            else:
+                print("No calibration checkpoint found. Using default threshold.")
+                calibration = CalibrationResult(optimal_threshold=0.5)
+
         run_inference(wrapper, loader, novel_states, calibration, paths, args)
 
 if __name__ == "__main__":

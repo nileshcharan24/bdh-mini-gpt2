@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Any
 
 import torch
 import torch.nn as nn
@@ -12,15 +12,22 @@ from torch import Tensor
 from ..config.model_config import InferenceConfig, ModelConfig
 from ..model.mini_gpt2 import MiniGPT2
 from ..model.bdh_recurrent import RecurrentBDH, RecurrentState
+# Import the API wrapper. Assuming user created it in model/api_models.py
+try:
+    from ..model.api_models import APIModelWrapper
+except ImportError:
+    APIModelWrapper = None
+
 from ..utils.data_loader import get_tokenizer
 
 
 class NarrativePredictor:
-    """Unified wrapper for Narrative Consistency models (GPT-2 or BDH).
+    """Unified wrapper for Narrative Consistency models (GPT-2, BDH, or API).
 
     This class abstracts the underlying model differences:
     - GPT-2: Uses mean hidden states for representation.
     - BDH: Uses accumulated ρ-matrix (associative memory) for representation.
+    - API: Uses external LLM calls for direct consistency prediction.
     """
 
     def __init__(
@@ -28,7 +35,7 @@ class NarrativePredictor:
         model_config: ModelConfig,
         inference_config: InferenceConfig,
         device: torch.device,
-        model: Optional[nn.Module] = None,
+        model: Optional[Any] = None, # model can be nn.Module or APIModelWrapper
         lm_head: Optional[nn.Module] = None,
     ) -> None:
         """Initialize the Predictor.
@@ -47,37 +54,49 @@ class NarrativePredictor:
 
         # 1. Initialize Model if not provided
         if model is not None:
-            self.model = model.to(device)
+            self.model = model
+            if isinstance(self.model, nn.Module):
+                self.model.to(device)
+                self.model.eval()
         else:
             if self.model_config.model_type == "bdh":
                 print("Initializing RecurrentBDH for inference...")
                 self.model = RecurrentBDH(model_config).to(device)
+                self.model.eval()
+            elif self.model_config.model_type == "api":
+                print(f"Initializing API Model ({self.model_config.api_provider})...")
+                if APIModelWrapper is None:
+                    raise ImportError("APIModelWrapper not found. Please ensure api_models.py exists.")
+                
+                self.model = APIModelWrapper(
+                    provider=self.model_config.api_provider,
+                    api_key=self.model_config.get_active_api_key(),
+                    model_name=self.model_config.api_model_name
+                )
             else:
                 print("Initializing MiniGPT2 for inference...")
                 self.model = MiniGPT2(model_config).to(device)
+                self.model.eval()
         
-        self.model.eval()
-
-        # 2. Handle LM Head
-        if self.model_config.model_type == "bdh":
-            # BDH has internal head, exposed as property or attribute
-            self.lm_head = getattr(self.model, 'lm_head', None)
-        else:
-            # GPT-2 needs external or internal head management
-            if lm_head is not None:
-                self.lm_head = lm_head.to(device)
-                self.lm_head.eval()
+        # 2. Handle LM Head (Only for local torch models)
+        self.lm_head = None
+        if isinstance(self.model, nn.Module):
+            if self.model_config.model_type == "bdh":
+                # BDH has internal head, exposed as property or attribute
+                self.lm_head = getattr(self.model, 'lm_head', None)
             else:
-                # Fallback: try to find classifier or create dummy if needed for pure representation
-                # For classification tasks, MiniGPT2 has self.classifier.
-                # For LM tasks, we might need a Linear layer.
-                self.lm_head = getattr(self.model, 'classifier', None)
+                # GPT-2 needs external or internal head management
+                if lm_head is not None:
+                    self.lm_head = lm_head.to(device)
+                    self.lm_head.eval()
+                else:
+                    self.lm_head = getattr(self.model, 'classifier', None)
 
     def compute_novel_state(
         self,
         book_path: Union[str, Path],
         verbose: bool = False,
-    ) -> Tensor:
+    ) -> Union[Tensor, str]:
         """Compute the state representation for an entire novel.
         
         Dispatches to specific logic based on model architecture.
@@ -87,6 +106,12 @@ class NarrativePredictor:
             print(f"Loading book from: {path}")
 
         text = path.read_text(encoding="utf-8", errors="replace")
+        
+        # API Mode: State is just the text
+        if self.model_config.model_type == "api":
+            return text
+
+        # Local Model Mode: Tokenize and compute state
         chunk_size = self.inference_config.chunk_size
         token_chunks = self.tokenizer.chunk_text(text, chunk_size)
 
@@ -102,7 +127,7 @@ class NarrativePredictor:
         self,
         text: str,
         verbose: bool = False,
-    ) -> Tuple[Tensor, None]:
+    ) -> Tuple[Union[Tensor, str], None]:
         """Compute state representation for a backstory.
         
         Args:
@@ -110,8 +135,11 @@ class NarrativePredictor:
             verbose: Print debug info.
             
         Returns:
-            Tuple of (Representation Tensor, None).
+            Tuple of (Representation, None).
         """
+        if self.model_config.model_type == "api":
+            return text, None
+
         chunk_size = self.inference_config.chunk_size
         token_chunks = self.tokenizer.chunk_text(text, chunk_size)
 
@@ -122,21 +150,39 @@ class NarrativePredictor:
 
     def compute_velocity_from_states(
         self, 
-        state_backstory: Tensor, 
-        state_novel: Tensor
+        state_backstory: Union[Tensor, str], 
+        state_novel: Union[Tensor, str]
     ) -> float:
         """Compute distance between backstory and novel states.
         
-        Calculates L2 Euclidean distance between the representation vectors
-        (whether they are ρ-matrices or averaged hidden states).
+        For Local Models: Calculates L2 Euclidean distance.
+        For API Models: Calls API to check consistency (mapped to 0.0 or 1.0).
         """
-        # Ensure both states are on the same device
-        sb = state_backstory.to(self.device)
-        sn = state_novel.to(self.device)
+        if self.model_config.model_type == "api":
+            # state_backstory is backstory text, state_novel is context text
+            # predict_consistency returns: 1 (Consistent), 0 (Contradictory), -1 (Error)
+            result = self.model.predict_consistency(
+                backstory=str(state_backstory), 
+                context=str(state_novel)
+            )
+            
+            if result == 1:
+                return 0.0 # Low velocity/distance = Consistent
+            elif result == 0:
+                return 1.0 # High velocity/distance = Contradictory
+            else:
+                return 0.5 # Ambiguous
+
+        # Local models: Ensure both states are tensors on the same device
+        if isinstance(state_backstory, Tensor) and isinstance(state_novel, Tensor):
+            sb = state_backstory.to(self.device)
+            sn = state_novel.to(self.device)
+            
+            # Calculate L2 Norm of difference
+            distance = torch.norm(sb - sn)
+            return float(distance.item())
         
-        # Calculate L2 Norm of difference
-        distance = torch.norm(sb - sn)
-        return float(distance.item())
+        return 0.0
 
     # --- Internal Logic for BDH (Recurrent ρ-Matrix) ---
     def _compute_bdh_state(self, token_chunks: list[list[int]]) -> Tensor:
@@ -210,6 +256,10 @@ class NarrativePredictor:
         
         Adapts to the input requirements of the specific architecture.
         """
+        # API models don't support calculating loss this way usually (no access to logits)
+        if self.model_config.model_type == "api":
+            return 0.0
+
         self.model.eval()
         tokens = self.tokenizer.encode(text)
         chunk_size = self.inference_config.chunk_size

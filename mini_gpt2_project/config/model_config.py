@@ -2,23 +2,33 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, fields
 from typing import Any, Dict, Mapping
 
 import torch
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 @dataclass
 class ModelConfig:
-    """Configuration for Recurrent BDH and Mini-GPT2 models (~30M parameters).
+    """Configuration for Recurrent BDH, Mini-GPT2, and API models (~30M parameters).
 
     This dataclass encapsulates the architectural hyperparameters for the
     models. With the default settings, the resulting model has approximately
     30 million trainable parameters, suitable for lightweight experimentation
-    and deployment.
+    and deployment. It also holds configuration for external API models.
 
     Attributes:
-        model_type: Architecture to use ("bdh" or "minigpt2").
+        model_type: Architecture to use ("bdh", "minigpt2", "api").
+        api_provider: API provider to use ("gemini", "groq", "huggingface").
+        api_model_name: Specific model name (leave empty for provider default).
+        gemini_key: API Key for Google Gemini (loaded from env).
+        groq_key: API Key for Groq (loaded from env).
+        hf_key: API Key for HuggingFace (loaded from env).
         vocab_size: Size of the token vocabulary.
         n_embd: Dimensionality of token embeddings and hidden states.
         n_layer: Number of layers (blocks).
@@ -32,8 +42,18 @@ class ModelConfig:
     """
 
     # --- MODEL SWITCH ---
-    model_type: str = "bdh"  # Options: "bdh", "minigpt2"
+    model_type: str = "api"  # Options: "bdh", "minigpt2", "api"
     # --------------------
+
+    # --- API CONFIGURATION ---
+    api_provider: str = "gemini" # Options: "gemini", "groq", "huggingface"
+    api_model_name: str = ""     # Leave empty for defaults
+    
+    # Keys loaded from Environment Variables
+    gemini_key: str = os.getenv("GEMINI_KEY", "")
+    groq_key: str = os.getenv("GROQ_KEY", "")
+    hf_key: str = os.getenv("HF_KEY", "")
+    # -------------------------
 
     vocab_size: int = 5000
     n_embd: int = 704
@@ -74,6 +94,16 @@ class ModelConfig:
             A dictionary representation of the configuration.
         """
         return asdict(self)
+
+    def get_active_api_key(self) -> str:
+        """Helper to get the key for the current api_provider."""
+        if self.api_provider == "gemini":
+            return self.gemini_key
+        elif self.api_provider == "groq":
+            return self.groq_key
+        elif self.api_provider == "huggingface":
+            return self.hf_key
+        return ""
 
 
 @dataclass
