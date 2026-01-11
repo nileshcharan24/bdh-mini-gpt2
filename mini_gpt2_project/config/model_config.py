@@ -41,10 +41,10 @@ class ModelConfig:
     # --------------------
 
     # --- API CONFIGURATION ---
-    api_provider: str = "gemini" # Options: "gemini", "groq", "huggingface"
-    # Switched to "gemini-pro" for maximum stability. 
-    # Can try "gemini-1.5-flash" again after library upgrade if needed.
-    api_model_name: str = "gemini-pro"     
+    api_provider: str = "groq" # Options: "gemini", "groq", "huggingface"
+    
+    # Using Llama 3 70B (Fast & High Intelligence)
+    api_model_name: str = "llama3-70b-8192"     
     
     # --- HARDCODED KEYS ---
     gemini_key: str = "AIzaSyCRZKG8wDenGmHSLJPL21ZMIRBW23hOlgk"
