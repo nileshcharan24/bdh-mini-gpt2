@@ -44,7 +44,7 @@ class ModelConfig:
     api_provider: str = "huggingface" # Options: "gemini", "groq", "huggingface"
     
     # Using Llama 3 70B (Fast & High Intelligence)
-    api_model_name: str = "HuggingFaceH4/zephyr-7b-beta"     
+    api_model_name: str = "microsoft/Phi-3.5-mini-instruct"     
     
     # --- HARDCODED KEYS ---
     gemini_key: str = "AIzaSyCRZKG8wDenGmHSLJPL21ZMIRBW23hOlgk"
