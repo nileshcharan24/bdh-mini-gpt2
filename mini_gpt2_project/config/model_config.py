@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import asdict, dataclass, fields
 from typing import Any, Dict, Mapping
 
 import torch
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
 
 
 @dataclass
@@ -26,9 +21,9 @@ class ModelConfig:
         model_type: Architecture to use ("bdh", "minigpt2", "api").
         api_provider: API provider to use ("gemini", "groq", "huggingface").
         api_model_name: Specific model name (leave empty for provider default).
-        gemini_key: API Key for Google Gemini (loaded from env).
-        groq_key: API Key for Groq (loaded from env).
-        hf_key: API Key for HuggingFace (loaded from env).
+        gemini_key: API Key for Google Gemini.
+        groq_key: API Key for Groq.
+        hf_key: API Key for HuggingFace.
         vocab_size: Size of the token vocabulary.
         n_embd: Dimensionality of token embeddings and hidden states.
         n_layer: Number of layers (blocks).
@@ -49,11 +44,11 @@ class ModelConfig:
     api_provider: str = "gemini" # Options: "gemini", "groq", "huggingface"
     api_model_name: str = ""     # Leave empty for defaults
     
-    # Keys loaded from Environment Variables
-    gemini_key: str = os.getenv("GEMINI_KEY", "")
-    groq_key: str = os.getenv("GROQ_KEY", "")
-    hf_key: str = os.getenv("HF_KEY", "")
-    # -------------------------
+    # --- HARDCODED KEYS ---
+    gemini_key: str = "AIzaSyCRZKG8wDenGmHSLJPL21ZMIRBW23hOlgk"
+    groq_key: str = "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"
+    hf_key: str = "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"
+    # ----------------------
 
     vocab_size: int = 5000
     n_embd: int = 704
