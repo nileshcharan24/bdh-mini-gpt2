@@ -158,9 +158,8 @@ def train_on_books(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    # Tokenizer Setup
+    # Tokenizer is already initialized in main(), but we call it here to get the object
     book_paths = [str(loader.get_book_path(name)) for name in loader.book_mapping.keys()]
-    print("Initializing Tokenizer...")
     tokenizer = get_tokenizer(model_config, training_files=book_paths)
     
     # Data Loading
@@ -466,6 +465,22 @@ def main():
     paths = setup_directories(args.output_dir)
     loader = DataLoader(base_path=PROJECT_ROOT.parent)
     
+    # ---------------------------------------------------------
+    # 0. FORCE TOKENIZER INITIALIZATION (FIX FOR API MODE CRASH)
+    # ---------------------------------------------------------
+    # Even if we skip training (API mode), the NarrativePredictor 
+    # instantiates a tokenizer class. In a fresh Kaggle environment, 
+    # vocab files are missing. We must ensure they exist.
+    print("Ensuring tokenizer is ready...")
+    try:
+        book_paths = [str(loader.get_book_path(name)) for name in loader.book_mapping.keys()]
+        # This call will train and save vocab if missing
+        _ = get_tokenizer(model_config, training_files=book_paths)
+    except Exception as e:
+        print(f"Warning: Tokenizer initialization check failed. Details: {e}")
+
+    # ---------------------------------------------------------
+
     print(f"Selected Model Architecture: {model_config.model_type.upper()}")
     
     # 1. Initialize Model Logic
