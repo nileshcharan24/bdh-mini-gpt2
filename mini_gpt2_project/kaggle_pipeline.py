@@ -17,7 +17,8 @@ def install_dependencies():
         "python-dotenv"
     ]
     print(f"Installing dependencies: {', '.join(packages)}...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install"] + packages + ["-q"])
+    # Added --upgrade to ensure we get versions that support newer models like 1.5-flash
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade"] + packages + ["-q"])
 
 def run_kaggle_pipeline():
     print("Starting Kaggle Pipeline...")

@@ -42,7 +42,9 @@ class ModelConfig:
 
     # --- API CONFIGURATION ---
     api_provider: str = "gemini" # Options: "gemini", "groq", "huggingface"
-    api_model_name: str = ""     # Leave empty for defaults
+    # Switched to "gemini-pro" for maximum stability. 
+    # Can try "gemini-1.5-flash" again after library upgrade if needed.
+    api_model_name: str = "gemini-pro"     
     
     # --- HARDCODED KEYS ---
     gemini_key: str = "AIzaSyCRZKG8wDenGmHSLJPL21ZMIRBW23hOlgk"
