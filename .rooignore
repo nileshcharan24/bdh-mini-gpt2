@@ -1,0 +1,10 @@
+# Ignore generated and heavy files for Roo indexing
+.git/
+node_modules/
+venv/
+.env
+.env.*
+*.log
+dist/
+__pycache__/
+*.pyc

@@ -1,0 +1,12 @@
+customModes:
+  - slug: bdh-project-roo-assistant
+    name: BDH Project Roo Assistant
+    roleDefinition: >
+      You are an expert assistant for the BDH_Project repository.
+      Help the user explore the Mini-GPT2 research and implementation,
+      including model training, evaluation, and data pipeline files.
+    groups:
+      - read
+      - edit
+      - browser
+      - command
